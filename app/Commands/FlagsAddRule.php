@@ -3,10 +3,9 @@
 namespace App\Commands;
 
 use App\Services\LaunchDarklyService;
-use LaravelZero\Framework\Commands\Command;
 use GuzzleHttp\Exception\GuzzleException;
 
-class FlagsAddRule extends Command
+class FlagsAddRule extends BaseCommand
 {
     /**
      * The signature of the command.
@@ -22,7 +21,6 @@ class FlagsAddRule extends Command
                             {--context-kind=request : Context kind for the rule}
                             {--bucket-by=key : Attribute to bucket by for percentage rollout}
                             {--position=0 : Position to insert the rule (0 is first)}
-                            {--debug : Show detailed debug information}
                             {--comment= : Comment to include with the change}
                             {--flag=api-v6-rollout-endpoints : The feature flag key to add rules to}
                             {--no-track : Disable event tracking for this rule}
@@ -54,295 +52,250 @@ class FlagsAddRule extends Command
         $this->ldService = $ldService;
 
         try {
-            $ruleName = $this->argument('name');
-            $endpointPattern = $this->argument('pattern');
-            $projectKey = $this->option('project') ?: config('launchdarkly.default_project');
-            $environmentKey = $this->option('environment') ?: config('launchdarkly.default_environment');
-            $force = $this->option('force') ?: false;
-            $v5Percentage = (int) $this->option('v5-percentage');
-            $v6Percentage = (int) $this->option('v6-percentage');
-            $contextKind = $this->option('context-kind');
-            $bucketBy = $this->option('bucket-by');
-            $position = (int) $this->option('position');
-            $debug = $this->option('debug');
-            $comment = $this->option('comment');
-            $trackEvents = !$this->option('no-track');
-            $useJsonPatch = $this->option('json-patch');
+            $this->initializeOptions();
 
-            // Flag key can now be specified via option
-            $flagKey = $this->option('flag');
-
-            if (empty($projectKey)) {
-                $this->error('No project specified and no default project configured.');
+            if (!$this->validateInputs()) {
                 return 1;
             }
 
-            if (empty($environmentKey)) {
-                $this->error('No environment specified and no default environment configured.');
-                return 1;
+            $this->displayRuleDetails();
+
+            if (!$this->confirmOperation()) {
+                return 0;
             }
 
-            // Validate percentages
-            if ($v5Percentage + $v6Percentage != 100) {
-                $this->error('Percentages must sum to 100%. Current sum: ' . ($v5Percentage + $v6Percentage) . '%');
-                return 1;
-            }
-
-            // Validate pattern format
-            if (!preg_match('/^(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s+\/.*$/', $endpointPattern)) {
-                $this->error('Pattern must be in the format "HTTP_METHOD /path" (e.g. "GET /api/users")');
-                return 1;
-            }
-
-            // Show what we're about to do
-            $this->info("Adding targeting rule to flag '{$flagKey}':");
-            $this->line("  • Project: {$projectKey}");
-            $this->line("  • Environment: {$environmentKey}");
-            $this->line("  • Rule name: {$ruleName}");
-            $this->line("  • Endpoint pattern: {$endpointPattern}");
-            $this->line("  • Rollout: {$v5Percentage}% to v5, {$v6Percentage}% to v6");
-            $this->line("  • Context kind: {$contextKind}");
-            $this->line("  • Bucket by: {$bucketBy}");
-            $this->line("  • Position: {$position}");
-            $this->line("  • Track events: " . ($trackEvents ? 'Yes' : 'No'));
-            $this->line("  • Using " . ($useJsonPatch ? "JSON Patch" : "Semantic Patch"));
-
-            if ($comment) {
-                $this->line("  • Comment: {$comment}");
-            }
-
-            if (!$force) {
-                if (!$this->confirm('Do you want to continue?', true)) {
-                    $this->line('Operation cancelled.');
-                    return 0;
-                }
-            }
-
-            // Get full flag data to ensure we have all variations and current rules
-            $flagData = $this->ldService->getFlag($projectKey, $flagKey);
+            $flagData = $this->ldService->getFlag($this->projectKey, $this->flagKey);
 
             if (!$flagData) {
-                $this->error("Flag '{$flagKey}' not found in project '{$projectKey}'.");
+                $this->error("Flag '{$this->flagKey}' not found in project '{$this->projectKey}'.");
                 return 1;
             }
 
-            // Display available environments when in debug mode
-            if ($debug) {
-                $this->info("\nDEBUG: Available environments in flag data:");
-                if (isset($flagData['environments']) && is_array($flagData['environments'])) {
-                    $availableEnvs = array_keys($flagData['environments']);
-                    $this->line("  Found " . count($availableEnvs) . " environments: " . implode(', ', $availableEnvs));
-                } else {
-                    $this->warn("  No environments data found in flag response!");
-                    $this->line("  Full flag data structure: " . json_encode(array_keys($flagData)));
-                }
-
-                // List all project environments
-                $this->info("\nDEBUG: Available environments in project:");
-                try {
-                    $projectEnvs = $this->ldService->getProjectEnvironments($projectKey);
-                    foreach ($projectEnvs as $env) {
-                        $this->line("  • {$env['key']} ({$env['name']})");
-                    }
-                } catch (\Exception $e) {
-                    $this->warn("  Error retrieving project environments: " . $e->getMessage());
-                }
-            }
-
-            // Check if environment exists
-            if (!isset($flagData['environments'][$environmentKey])) {
-                $this->error("Environment '{$environmentKey}' not found for flag '{$flagKey}'.");
-                $this->line("\nAvailable environments for this flag:");
-                if (isset($flagData['environments']) && is_array($flagData['environments'])) {
-                    foreach (array_keys($flagData['environments']) as $env) {
-                        $this->line("  • {$env}");
-                    }
-                } else {
-                    $this->line("  No environments found in flag data.");
-                }
+            if (!$this->validateEnvironment($flagData)) {
                 return 1;
             }
 
-            // Verify variation indices - we assume v5 is 0 and v6 is 1, but let's check
-            $variations = $flagData['variations'] ?? [];
-            if (count($variations) < 2) {
-                $this->error("Flag '{$flagKey}' does not have enough variations.");
+            if (!$this->validateVariations($flagData)) {
                 return 1;
             }
 
-            // Display variation information for confirmation
-            $this->info("\nVariations detected:");
-            foreach ($variations as $index => $variation) {
-                $value = json_encode($variation['value']);
-                $name = $variation['name'] ?? "Variation {$index}";
-                $this->line("  • Variation {$index}: {$name} ({$value})");
-            }
+            $result = $this->useJsonPatch ? $this->addRuleWithJsonPatch() : $this->addRuleWithSemanticPatch($flagData);
 
-            // Display existing rules count
-            $existingRules = $flagData['environments'][$environmentKey]['rules'] ?? [];
-            $this->info("\nCurrent rules count: " . count($existingRules));
-            if ($position > count($existingRules)) {
-                $this->warn("Position {$position} is greater than the number of existing rules. The rule will be added at the end.");
-            }
-
-            // Get variation IDs from flag data
-            $variationIds = [];
-            foreach ($variations as $variation) {
-                if (isset($variation['_id'])) {
-                    $variationIds[] = $variation['_id'];
-                }
-            }
-
-            if (count($variationIds) < 2 && $debug) {
-                $this->warn("Could not find variation IDs in flag data. Using indices instead.");
-                // If we can't get variation IDs, fall back to indices
-                $variationIds = [0, 1];
-            }
-
-            // Create the rule
-            if ($useJsonPatch) {
-                // Use JSON Patch approach
-                $result = $this->addRuleWithJsonPatch(
-                    $projectKey,
-                    $flagKey,
-                    $environmentKey,
-                    $ruleName,
-                    $endpointPattern,
-                    $v5Percentage,
-                    $v6Percentage,
-                    $contextKind,
-                    $bucketBy,
-                    $trackEvents,
-                    $position,
-                    $comment
-                );
-            } else {
-                // Create the rule using semantic patch
-                $rule = $this->ldService->createEndpointMatchingRule(
-                    $ruleName,
-                    $endpointPattern,
-                    [$v5Percentage, $v6Percentage],
-                    $bucketBy,
-                    $contextKind,
-                    $trackEvents,
-                    $variationIds
-                );
-
-                if ($debug) {
-                    $this->info("\nDEBUG: Rule payload:");
-                    $this->line(json_encode($rule, JSON_PRETTY_PRINT));
-                }
-
-                // Add the rule to the flag using semantic patch
-                $result = $this->ldService->addTargetingRule(
-                    $projectKey,
-                    $flagKey,
-                    $environmentKey,
-                    $rule,
-                    $comment,
-                    $position
-                );
-            }
-
-            if ($result) {
-                $this->info("Successfully added targeting rule '{$ruleName}' to flag '{$flagKey}'.");
-                $this->line("The rule will match: <fg=yellow>{$endpointPattern}</>");
-                $this->line("Traffic split: <fg=green>{$v5Percentage}%</> to v5, <fg=green>{$v6Percentage}%</> to v6");
-                return 0;
-            } else {
-                $this->error("Failed to add targeting rule.");
-                return 1;
-            }
+            return $result ? $this->successMessage() : $this->failureMessage();
         } catch (GuzzleException $e) {
-            $this->error('Error connecting to LaunchDarkly: ' . $e->getMessage());
-            if ($this->option('debug')) {
-                $this->line("\nDEBUG: Exception details:");
-                $this->line("  Class: " . get_class($e));
-                $this->line("  Code: " . $e->getCode());
-                $this->line("  Full message: " . $e->getMessage());
-            }
-            return 1;
+            return $this->handleException($e);
         } catch (\Exception $e) {
-            $this->error('Error: ' . $e->getMessage());
-            if ($this->option('debug')) {
-                $this->line("\nDEBUG: Exception details:");
-                $this->line("  Class: " . get_class($e));
-                $this->line("  Code: " . $e->getCode());
-                $this->line("  Full message: " . $e->getMessage());
-                $this->line("  Trace: " . $e->getTraceAsString());
-            }
-            return 1;
+            return $this->handleException($e);
         }
     }
 
-    /**
-     * Add a rule using the JSON Patch approach instead of semantic patch.
-     */
-    protected function addRuleWithJsonPatch(
-        string $projectKey,
-        string $flagKey,
-        string $environmentKey,
-        string $ruleName,
-        string $endpointPattern,
-        int $v5Percentage,
-        int $v6Percentage,
-        string $contextKind,
-        string $bucketBy,
-        bool $trackEvents,
-        int $position,
-        ?string $comment
-    ): bool {
-        // Get current rules
-        $flagData = $this->ldService->getFlag($projectKey, $flagKey);
-        $rules = $flagData['environments'][$environmentKey]['rules'] ?? [];
+    protected function initializeOptions(): void
+    {
+        $this->ruleName = $this->argument('name');
+        $this->endpointPattern = $this->argument('pattern');
+        $this->projectKey = $this->option('project') ?: config('launchdarkly.default_project');
+        $this->environmentKey = $this->option('environment') ?: config('launchdarkly.default_environment');
+        $this->force = $this->option('force') ?: false;
+        $this->v5Percentage = (int) $this->option('v5-percentage');
+        $this->v6Percentage = (int) $this->option('v6-percentage');
+        $this->contextKind = $this->option('context-kind');
+        $this->bucketBy = $this->option('bucket-by');
+        $this->position = (int) $this->option('position');
+        $this->comment = $this->option('comment');
+        $this->trackEvents = !$this->option('no-track');
+        $this->useJsonPatch = $this->option('json-patch');
+        $this->flagKey = $this->option('flag');
+    }
 
-        // Create a new rule
+    protected function validateInputs(): bool
+    {
+        if (empty($this->projectKey)) {
+            $this->error('No project specified and no default project configured.');
+            return false;
+        }
+
+        if (empty($this->environmentKey)) {
+            $this->error('No environment specified and no default environment configured.');
+            return false;
+        }
+
+        if ($this->v5Percentage + $this->v6Percentage != 100) {
+            $this->error('Percentages must sum to 100%. Current sum: ' . ($this->v5Percentage + $this->v6Percentage) . '%');
+            return false;
+        }
+
+        if (!preg_match('/^(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s+\/.*$/', $this->endpointPattern)) {
+            $this->error('Pattern must be in the format "HTTP_METHOD /path" (e.g. "GET /api/users")');
+            return false;
+        }
+
+        return true;
+    }
+
+    protected function displayRuleDetails(): void
+    {
+        $this->info("Adding targeting rule to flag '{$this->flagKey}':");
+        $this->line("  • Project: {$this->projectKey}");
+        $this->line("  • Environment: {$this->environmentKey}");
+        $this->line("  • Rule name: {$this->ruleName}");
+        $this->line("  • Endpoint pattern: {$this->endpointPattern}");
+        $this->line("  • Rollout: {$this->v5Percentage}% to v5, {$this->v6Percentage}% to v6");
+        $this->line("  • Context kind: {$this->contextKind}");
+        $this->line("  • Bucket by: {$this->bucketBy}");
+        $this->line("  • Position: {$this->position}");
+        $this->line("  • Track events: " . ($this->trackEvents ? 'Yes' : 'No'));
+        $this->line("  • Using " . ($this->useJsonPatch ? "JSON Patch" : "Semantic Patch"));
+
+        if ($this->comment) {
+            $this->line("  • Comment: {$this->comment}");
+        }
+    }
+
+    protected function confirmOperation(): bool
+    {
+        if (!$this->force) {
+            return $this->confirm('Do you want to continue?', true);
+        }
+        return true;
+    }
+
+    protected function validateEnvironment(array $flagData): bool
+    {
+        if (!isset($flagData['environments'][$this->environmentKey])) {
+            $this->error("Environment '{$this->environmentKey}' not found for flag '{$this->flagKey}'.");
+            $this->line("\nAvailable environments for this flag:");
+            if (isset($flagData['environments']) && is_array($flagData['environments'])) {
+                foreach (array_keys($flagData['environments']) as $env) {
+                    $this->line("  • {$env}");
+                }
+            } else {
+                $this->line("  No environments found in flag data.");
+            }
+            return false;
+        }
+        return true;
+    }
+
+    protected function validateVariations(array $flagData): bool
+    {
+        $variations = $flagData['variations'] ?? [];
+        if (count($variations) < 2) {
+            $this->error("Flag '{$this->flagKey}' does not have enough variations.");
+            return false;
+        }
+
+        $this->info("\nVariations detected:");
+        foreach ($variations as $index => $variation) {
+            $value = json_encode($variation['value']);
+            $name = $variation['name'] ?? "Variation {$index}";
+            $this->line("  • Variation {$index}: {$name} ({$value})");
+        }
+
+        $existingRules = $flagData['environments'][$this->environmentKey]['rules'] ?? [];
+        $this->info("\nCurrent rules count: " . count($existingRules));
+        if ($this->position > count($existingRules)) {
+            $this->warn("Position {$this->position} is greater than the number of existing rules. The rule will be added at the end.");
+        }
+
+        $this->variationIds = [];
+        foreach ($variations as $variation) {
+            if (isset($variation['_id'])) {
+                $this->variationIds[] = $variation['_id'];
+            }
+        }
+
+        if (count($this->variationIds) < 2) {
+            $this->variationIds = [0, 1];
+        }
+
+        return true;
+    }
+
+    protected function addRuleWithSemanticPatch(array $flagData): bool
+    {
+        $rule = $this->ldService->createEndpointMatchingRule(
+            $this->ruleName,
+            $this->endpointPattern,
+            [$this->v5Percentage, $this->v6Percentage],
+            $this->bucketBy,
+            $this->contextKind,
+            $this->trackEvents,
+            $this->variationIds
+        );
+
+        return $this->ldService->addTargetingRule(
+            $this->projectKey,
+            $this->flagKey,
+            $this->environmentKey,
+            $rule,
+            $this->comment,
+            $this->position
+        );
+    }
+
+    protected function addRuleWithJsonPatch(): bool
+    {
+        $flagData = $this->ldService->getFlag($this->projectKey, $this->flagKey);
+        $rules = $flagData['environments'][$this->environmentKey]['rules'] ?? [];
+
         $newRule = [
-            'description' => $ruleName,
+            'description' => $this->ruleName,
             'clauses' => [
                 [
                     'attribute' => 'endpoint_pattern',
                     'op' => 'matches',
-                    'values' => [$endpointPattern],
-                    'contextKind' => $contextKind,
+                    'values' => [$this->endpointPattern],
+                    'contextKind' => $this->contextKind,
                     'negate' => false
                 ]
             ],
-            'trackEvents' => $trackEvents,
+            'trackEvents' => $this->trackEvents,
             'rollout' => [
                 'variations' => [
                     [
                         'variation' => 0,
-                        'weight' => $v5Percentage * 1000
+                        'weight' => $this->v5Percentage * 1000
                     ],
                     [
                         'variation' => 1,
-                        'weight' => $v6Percentage * 1000
+                        'weight' => $this->v6Percentage * 1000
                     ]
                 ],
-                'bucketBy' => $bucketBy,
-                'contextKind' => $contextKind
+                'bucketBy' => $this->bucketBy,
+                'contextKind' => $this->contextKind
             ]
         ];
 
-        // Insert the new rule at the specified position
-        array_splice($rules, $position, 0, [$newRule]);
+        array_splice($rules, $this->position, 0, [$newRule]);
 
-        // Create JSON patch
         $patch = [
             [
                 'op' => 'replace',
-                'path' => "/environments/{$environmentKey}/rules",
+                'path' => "/environments/{$this->environmentKey}/rules",
                 'value' => $rules
             ]
         ];
 
-        if ($this->option('debug')) {
-            $this->info("\nDEBUG: JSON Patch payload:");
-            $this->line(json_encode($patch, JSON_PRETTY_PRINT));
-        }
+        return $this->ldService->updateFlagWithJsonPatch($this->projectKey, $this->flagKey, $patch, $this->comment);
+    }
 
-        // Apply the patch
-        return $this->ldService->updateFlagWithJsonPatch($projectKey, $flagKey, $patch, $comment);
+    protected function successMessage(): int
+    {
+        $this->info("Successfully added targeting rule '{$this->ruleName}' to flag '{$this->flagKey}'.");
+        $this->line("The rule will match: <fg=yellow>{$this->endpointPattern}</>");
+        $this->line("Traffic split: <fg=green>{$this->v5Percentage}%</> to v5, <fg=green>{$this->v6Percentage}%</> to v6");
+        return 0;
+    }
+
+    protected function failureMessage(): int
+    {
+        $this->error("Failed to add targeting rule.");
+        return 1;
+    }
+
+    protected function handleException(\Exception $e): int
+    {
+        $this->error('Error: ' . $e->getMessage());
+        return 1;
     }
 }

@@ -44,9 +44,10 @@ class EnvironmentsList extends Command
     /**
      * Execute the console command.
      *
-     * @return mixed
+     * @param LaunchDarklyService $ldService
+     * @return int
      */
-    public function handle(LaunchDarklyService $ldService)
+    public function handle(LaunchDarklyService $ldService): int
     {
         $this->ldService = $ldService;
 
@@ -93,73 +94,19 @@ class EnvironmentsList extends Command
      * @param array $environments
      * @return void
      */
-    protected function displayEnvironmentsTable($environments)
+    protected function displayEnvironmentsTable(array $environments): void
     {
         // Sort environments, putting critical ones first, then alphabetically
-        usort($environments, function($a, $b) {
-            if ($a['critical'] !== $b['critical']) {
-                return $b['critical'] ? 1 : -1; // Critical environments first
-            }
-            return strcmp($a['name'], $b['name']); // Then alphabetically
-        });
+        usort($environments, fn($a, $b) => $a['critical'] !== $b['critical'] ? ($b['critical'] ? 1 : -1) : strcmp($a['name'], $b['name']));
 
         // Prepare table data
-        $tableData = [];
-        foreach ($environments as $env) {
-            $row = [
-                'key' => $env['key'],
-                'name' => $env['name'],
-                'critical' => $env['critical'] ? 'Yes' : 'No',
-                'secure' => $env['secure'] ? 'Yes' : 'No',
-            ];
-
-            // Format color if available
-            if (isset($env['color']) && !empty($env['color'])) {
-                $row['color'] = "#{$env['color']}";
-            }
-
-            // Include client-side ID if available
-            if (isset($env['clientSideId']) && !empty($env['clientSideId'])) {
-                $row['clientSideId'] = $env['clientSideId'];
-            }
-
-            // Include mobile SDK key if available (truncated for security)
-            if (isset($env['mobileSdkKey']) && !empty($env['mobileSdkKey'])) {
-                $row['mobileSdkKey'] = substr($env['mobileSdkKey'], 0, 8) . '...';
-            }
-
-            // Add approval settings if available
-            if (isset($env['approvalSettings']) && is_array($env['approvalSettings'])) {
-                $row['approvals'] = $env['approvalSettings']['required'] ? 'Required' : 'Optional';
-
-                if (isset($env['approvalSettings']['minNumApprovals']) && $env['approvalSettings']['minNumApprovals'] > 1) {
-                    $row['approvals'] .= " ({$env['approvalSettings']['minNumApprovals']})";
-                }
-            }
-
-            // Add workflow settings
-            $workflow = [];
-            if ($env['requireComments']) $workflow[] = 'comments';
-            if ($env['confirmChanges']) $workflow[] = 'confirmation';
-            if (!empty($workflow)) {
-                $row['workflow'] = ucfirst(implode(', ', $workflow));
-            }
-
-            // Add any tags
-            if (!empty($env['tags'])) {
-                $row['tags'] = implode(', ', $env['tags']);
-            }
-
-            $tableData[] = $row;
-        }
+        $tableData = array_map(fn($env) => $this->formatEnvironmentRow($env), $environments);
 
         // Define headers based on available data
         $headers = array_keys($tableData[0]);
 
         // Format headers for display
-        $formattedHeaders = array_map(function($header) {
-            return ucfirst(preg_replace('/(?<!^)[A-Z]/', ' $0', $header));
-        }, $headers);
+        $formattedHeaders = array_map(fn($header) => ucfirst(preg_replace('/(?<!^)[A-Z]/', ' $0', $header)), $headers);
 
         // Display table
         $this->table($formattedHeaders, $tableData);
@@ -172,5 +119,60 @@ class EnvironmentsList extends Command
             $critical = $env['critical'] ? ' (critical)' : '';
             $this->line("  {$env['key']}{$critical}");
         }
+    }
+
+    /**
+     * Format a single environment row for the table.
+     *
+     * @param array $env
+     * @return array
+     */
+    protected function formatEnvironmentRow(array $env): array
+    {
+        $row = [
+            'key' => $env['key'],
+            'name' => $env['name'],
+            'critical' => $env['critical'] ? 'Yes' : 'No',
+            'secure' => $env['secure'] ? 'Yes' : 'No',
+        ];
+
+        // Format color if available
+        if (!empty($env['color'])) {
+            $row['color'] = "#{$env['color']}";
+        }
+
+        // Include client-side ID if available
+        if (!empty($env['clientSideId'])) {
+            $row['clientSideId'] = $env['clientSideId'];
+        }
+
+        // Include mobile SDK key if available (truncated for security)
+        if (!empty($env['mobileSdkKey'])) {
+            $row['mobileSdkKey'] = substr($env['mobileSdkKey'], 0, 8) . '...';
+        }
+
+        // Add approval settings if available
+        if (!empty($env['approvalSettings']) && is_array($env['approvalSettings'])) {
+            $row['approvals'] = $env['approvalSettings']['required'] ? 'Required' : 'Optional';
+
+            if (!empty($env['approvalSettings']['minNumApprovals']) && $env['approvalSettings']['minNumApprovals'] > 1) {
+                $row['approvals'] .= " ({$env['approvalSettings']['minNumApprovals']})";
+            }
+        }
+
+        // Add workflow settings
+        $workflow = [];
+        if ($env['requireComments']) $workflow[] = 'comments';
+        if ($env['confirmChanges']) $workflow[] = 'confirmation';
+        if (!empty($workflow)) {
+            $row['workflow'] = ucfirst(implode(', ', $workflow));
+        }
+
+        // Add any tags
+        if (!empty($env['tags'])) {
+            $row['tags'] = implode(', ', $env['tags']);
+        }
+
+        return $row;
     }
 }

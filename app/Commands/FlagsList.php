@@ -3,10 +3,9 @@
 namespace App\Commands;
 
 use App\Services\LaunchDarklyService;
-use LaravelZero\Framework\Commands\Command;
 use GuzzleHttp\Exception\GuzzleException;
 
-class FlagsList extends Command
+class FlagsList extends BaseCommand
 {
     /**
      * The signature of the command.
@@ -43,87 +42,69 @@ class FlagsList extends Command
     {
         $this->ldService = $ldService;
         try {
-            $projectKey = $this->option('project') ?: config('launchdarkly.default_project');
-            $environmentKey = $this->option('environment') ?: config('launchdarkly.default_environment');
-            $tag = $this->option('tag');
-            $debug = $this->option('debug');
+            $this->initializeOptions();
 
-            if (empty($projectKey)) {
+            if (empty($this->projectKey)) {
                 $this->error('No project specified and no default project configured.');
                 return 1;
             }
 
-            $this->info("Getting LaunchDarkly flags for project: {$projectKey}");
+            $this->info("Getting LaunchDarkly flags for project: {$this->projectKey}");
 
-            // Get default environment if none specified but environment-filtered features are requested
-            if (empty($environmentKey) && $this->option('environment') !== false) {
-                $environmentKey = config('launchdarkly.default_environment');
-                if ($environmentKey) {
-                    $this->info("Using default environment: {$environmentKey}");
-                }
-            }
-
-            // Get all flags for the project
-            $flags = $this->ldService->getFlags($projectKey);
+            $flags = $this->ldService->getFlags($this->projectKey);
             if (empty($flags)) {
-                $this->warn("No flags found in project: {$projectKey}");
+                $this->warn("No flags found in project: {$this->projectKey}");
                 return 0;
             }
 
-            // Filter by tag if specified
-            if ($tag) {
-                $flags = array_filter($flags, fn($flag) => in_array($tag, $flag['tags'] ?? []));
-
-                if (empty($flags)) {
-                    $this->warn("No flags found with tag: {$tag}");
-                    return 0;
-                }
+            $flags = $this->filterFlagsByTag($flags);
+            if ($flags === null) {
+                return 0;
             }
 
-            // If JSON output is requested
             if ($this->option('json')) {
-                $this->line(json_encode($flags, JSON_PRETTY_PRINT));
+                $this->outputJson($flags);
                 return 0;
             }
 
-            // Get detailed flag information if we need to filter by environment
-            $tableData = $environmentKey
-                ? $this->prepareEnvironmentFilteredTable($flags, $projectKey, $environmentKey, $debug)
+            $tableData = $this->environmentKey
+                ? $this->prepareEnvironmentFilteredTable($flags, $this->projectKey, $this->environmentKey, $this->option('debug'))
                 : $this->prepareBasicTable($flags);
 
-            // Sort flags alphabetically by key
-            usort($tableData, fn($a, $b) => strcmp($a['key'], $b['key']));
-
-            // Display the table
-            $headers = array_keys($tableData[0]);
-            $this->table($headers, $tableData);
-            $this->info("Total flags: " . count($tableData));
+            $this->displayTable($tableData);
 
             return 0;
         } catch (GuzzleException $e) {
-            $this->error('Error connecting to LaunchDarkly: ' . $e->getMessage());
-            if ($debug) {
-                $this->line("\nDEBUG: Exception details:");
-                $this->line("  Class: " . get_class($e));
-                $this->line("  Code: " . $e->getCode());
-                $this->line("  Full message: " . $e->getMessage());
-            }
-            return 1;
+            return $this->handleException($e);
         } catch (\Exception $e) {
-            $this->error('Error: ' . $e->getMessage());
-            if ($debug) {
-                $this->line("\nDEBUG: Exception details:");
-                $this->line("  Class: " . get_class($e));
-                $this->line("  Code: " . $e->getCode());
-                $this->line("  Full message: " . $e->getMessage());
-            }
-            return 1;
+            return $this->handleException($e);
         }
     }
 
-    /**
-     * Prepare a basic table with flag information.
-     */
+    protected function initializeOptions(): void
+    {
+        $this->projectKey = $this->option('project') ?: config('launchdarkly.default_project');
+        $this->environmentKey = $this->option('environment') ?: config('launchdarkly.default_environment');
+        $this->tag = $this->option('tag');
+    }
+
+    protected function filterFlagsByTag(array $flags): ?array
+    {
+        if ($this->tag) {
+            $flags = array_filter($flags, fn($flag) => in_array($this->tag, $flag['tags'] ?? []));
+            if (empty($flags)) {
+                $this->warn("No flags found with tag: {$this->tag}");
+                return null;
+            }
+        }
+        return $flags;
+    }
+
+    protected function outputJson(array $flags): void
+    {
+        $this->line(json_encode($flags, JSON_PRETTY_PRINT));
+    }
+
     protected function prepareBasicTable(array $flags): array
     {
         return array_map(fn($flag) => [
@@ -137,9 +118,6 @@ class FlagsList extends Command
         ], $flags);
     }
 
-    /**
-     * Prepare a table with environment-filtered flag information.
-     */
     protected function prepareEnvironmentFilteredTable(array $flags, string $projectKey, string $environmentKey, bool $debug): array
     {
         $tableData = [];
@@ -212,5 +190,19 @@ class FlagsList extends Command
         }
 
         return $tableData;
+    }
+
+    protected function displayTable(array $tableData): void
+    {
+        usort($tableData, fn($a, $b) => strcmp($a['key'], $b['key']));
+        $headers = array_keys($tableData[0]);
+        $this->table($headers, $tableData);
+        $this->info("Total flags: " . count($tableData));
+    }
+
+    protected function handleException(\Exception $e): int
+    {
+        $this->error('Error: ' . $e->getMessage());
+        return 1;
     }
 }

@@ -3,10 +3,9 @@
 namespace App\Commands;
 
 use App\Services\LaunchDarklyService;
-use LaravelZero\Framework\Commands\Command;
 use GuzzleHttp\Exception\GuzzleException;
 
-class FlagsShow extends Command
+class FlagsShow extends BaseCommand
 {
     /**
      * The signature of the command.
@@ -46,108 +45,123 @@ class FlagsShow extends Command
     /**
      * Execute the console command.
      *
-     * @return mixed
+     * @return int
      */
-    public function handle(LaunchDarklyService $ldService)
+    public function handle(LaunchDarklyService $ldService): int
     {
         $this->ldService = $ldService;
 
         try {
-            $flagKey = $this->argument('flag-key');
-            $projectKey = $this->option('project') ?: config('launchdarkly.default_project');
-            $environmentKey = $this->option('environment') ?: config('launchdarkly.default_environment');
+            $this->initializeOptions();
 
-            if (empty($projectKey)) {
+            if (empty($this->projectKey)) {
                 $this->error('No project specified and no default project configured.');
                 return 1;
             }
 
-            // Get detailed flag information using the enhanced method
-            $flagDetails = $this->ldService->getFlagDetails($projectKey, $flagKey);
+            $flagDetails = $this->ldService->getFlagDetails($this->projectKey, $this->flagKey);
 
             if (!$flagDetails) {
-                $this->error("Flag '{$flagKey}' not found in project '{$projectKey}'.");
+                $this->error("Flag '{$this->flagKey}' not found in project '{$this->projectKey}'.");
                 return 1;
             }
 
-            // If JSON output is requested
             if ($this->option('json')) {
-                $this->line(json_encode($flagDetails, JSON_PRETTY_PRINT));
+                $this->outputJson($flagDetails);
                 return 0;
             }
 
-            // Display flag details
-            $this->displayFlagDetails($flagDetails, $projectKey, $environmentKey);
+            $this->displayFlagDetails($flagDetails);
 
             return 0;
         } catch (GuzzleException $e) {
-            $this->error('Error connecting to LaunchDarkly: ' . $e->getMessage());
-            return 1;
+            return $this->handleException($e);
         } catch (\Exception $e) {
-            $this->error('Error: ' . $e->getMessage());
-            return 1;
+            return $this->handleException($e);
         }
     }
 
-    /**
-     * Display detailed information about a flag.
-     *
-     * @param array $flag
-     * @param string $projectKey
-     * @param string|null $environmentKey
-     * @return void
-     */
-    protected function displayFlagDetails($flag, $projectKey, $environmentKey = null)
+    protected function initializeOptions(): void
+    {
+        $this->flagKey = $this->argument('flag-key');
+        $this->projectKey = $this->option('project') ?: config('launchdarkly.default_project');
+        $this->environmentKey = $this->option('environment') ?: config('launchdarkly.default_environment');
+    }
+
+    protected function outputJson(array $flagDetails): void
+    {
+        $this->line(json_encode($flagDetails, JSON_PRETTY_PRINT));
+    }
+
+    protected function displayFlagDetails(array $flagDetails): void
     {
         $this->info('==== Flag Details ====');
-        $this->line("<fg=green>Key:</> {$flag['key']}");
-        $this->line("<fg=green>Name:</> {$flag['name']}");
-        $this->line("<fg=green>Description:</> " . ($flag['description'] ?? 'N/A'));
-        $this->line("<fg=green>Kind:</> " . ($flag['kind'] ?? 'N/A'));
-        $this->line("<fg=green>Created:</> " . ($flag['creationDate'] ?? 'Unknown'));
+        $this->line("<fg=green>Key:</> {$flagDetails['key']}");
+        $this->line("<fg=green>Name:</> {$flagDetails['name']}");
+        $this->line("<fg=green>Description:</> " . ($flagDetails['description'] ?? 'N/A'));
+        $this->line("<fg=green>Kind:</> " . ($flagDetails['kind'] ?? 'N/A'));
+        $this->line("<fg=green>Created:</> " . ($flagDetails['creationDate'] ?? 'Unknown'));
 
-        if (!empty($flag['tags'])) {
-            $this->line("<fg=green>Tags:</> " . implode(', ', $flag['tags']));
+        if (!empty($flagDetails['tags'])) {
+            $this->line("<fg=green>Tags:</> " . implode(', ', $flagDetails['tags']));
         }
 
-        $this->line("<fg=green>Temporary:</> " . ($flag['temporary'] ? 'Yes' : 'No'));
-        $this->line("<fg=green>Archived:</> " . ($flag['archived'] ? 'Yes' : 'No'));
-        $this->line("<fg=green>Deprecated:</> " . ($flag['deprecated'] ? 'Yes' : 'No'));
+        $this->line("<fg=green>Temporary:</> " . ($flagDetails['temporary'] ? 'Yes' : 'No'));
+        $this->line("<fg=green>Archived:</> " . ($flagDetails['archived'] ? 'Yes' : 'No'));
+        $this->line("<fg=green>Deprecated:</> " . ($flagDetails['deprecated'] ? 'Yes' : 'No'));
 
-        // Show client-side availability
-        if (isset($flag['clientSideAvailability'])) {
+        $this->displayClientSideAvailability($flagDetails);
+        $this->displayDefaults($flagDetails);
+        $this->displayMaintainer($flagDetails);
+        $this->displayVariations($flagDetails);
+        $this->displayCustomProperties($flagDetails);
+
+        if ($this->environmentKey) {
+            $this->displayEnvironmentDetails($flagDetails);
+        }
+    }
+
+    protected function displayClientSideAvailability(array $flagDetails): void
+    {
+        if (isset($flagDetails['clientSideAvailability'])) {
             $this->newLine();
             $this->info('==== Client-side Availability ====');
-            $this->line("<fg=green>Using Mobile Key:</> " . ($flag['clientSideAvailability']['usingMobileKey'] ? 'Yes' : 'No'));
-            $this->line("<fg=green>Using Environment ID:</> " . ($flag['clientSideAvailability']['usingEnvironmentId'] ? 'Yes' : 'No'));
+            $this->line("<fg=green>Using Mobile Key:</> " . ($flagDetails['clientSideAvailability']['usingMobileKey'] ? 'Yes' : 'No'));
+            $this->line("<fg=green>Using Environment ID:</> " . ($flagDetails['clientSideAvailability']['usingEnvironmentId'] ? 'Yes' : 'No'));
         }
+    }
 
-        // Show defaults
-        if (isset($flag['defaults'])) {
+    protected function displayDefaults(array $flagDetails): void
+    {
+        if (isset($flagDetails['defaults'])) {
             $this->newLine();
             $this->info('==== Default Settings ====');
-            $onVariation = $flag['defaults']['onVariation'] ?? 'N/A';
-            $offVariation = $flag['defaults']['offVariation'] ?? 'N/A';
+            $onVariation = $flagDetails['defaults']['onVariation'] ?? 'N/A';
+            $offVariation = $flagDetails['defaults']['offVariation'] ?? 'N/A';
             $this->line("<fg=green>On Variation:</> {$onVariation}");
             $this->line("<fg=green>Off Variation:</> {$offVariation}");
         }
+    }
 
-        // Show maintainer info
-        if (isset($flag['maintainer'])) {
+    protected function displayMaintainer(array $flagDetails): void
+    {
+        if (isset($flagDetails['maintainer'])) {
             $this->newLine();
             $this->info('==== Maintainer ====');
-            $maintainer = $flag['maintainer'];
+            $maintainer = $flagDetails['maintainer'];
             $this->line("<fg=green>Name:</> {$maintainer['firstName']} {$maintainer['lastName']}");
             $this->line("<fg=green>Email:</> {$maintainer['email']}");
             $this->line("<fg=green>Role:</> {$maintainer['role']}");
         }
+    }
 
-        // Show variations
-        if (!empty($flag['variations'])) {
+    protected function displayVariations(array $flagDetails): void
+    {
+        if (!empty($flagDetails['variations'])) {
             $this->newLine();
             $this->info('==== Variations ====');
 
-            foreach ($flag['variations'] as $index => $variation) {
+            foreach ($flagDetails['variations'] as $index => $variation) {
                 $this->line("<fg=yellow>Variation {$index}:</>");
                 $this->line("  Value: " . json_encode($variation['value']));
                 $this->line("  Name: " . ($variation['name'] ?? 'N/A'));
@@ -158,12 +172,14 @@ class FlagsShow extends Command
                 $this->newLine();
             }
         }
+    }
 
-        // Show custom properties if present
-        if (!empty($flag['customProperties'])) {
+    protected function displayCustomProperties(array $flagDetails): void
+    {
+        if (!empty($flagDetails['customProperties'])) {
             $this->newLine();
             $this->info('==== Custom Properties ====');
-            foreach ($flag['customProperties'] as $key => $property) {
+            foreach ($flagDetails['customProperties'] as $key => $property) {
                 $propName = $property['name'] ?? $key;
                 $propValue = is_array($property['value'])
                     ? implode(', ', $property['value'])
@@ -171,133 +187,152 @@ class FlagsShow extends Command
                 $this->line("<fg=green>{$propName}:</> {$propValue}");
             }
         }
+    }
 
-        // Get environment-specific details if specified
-        if ($environmentKey) {
-            if (isset($flag['environments'][$environmentKey])) {
-                $flagEnv = $flag['environments'][$environmentKey];
+    protected function displayEnvironmentDetails(array $flagDetails): void
+    {
+        if (isset($flagDetails['environments'][$this->environmentKey])) {
+            $flagEnv = $flagDetails['environments'][$this->environmentKey];
+
+            $this->newLine();
+            $this->info("==== Environment: {$this->environmentKey} ====");
+            $this->line("<fg=green>Status:</> " . ($flagEnv['on'] ? 'ON' : 'OFF'));
+
+            if (isset($flagEnv['lastModified'])) {
+                $this->line("<fg=green>Last Modified:</> " . $flagEnv['lastModified']);
+            }
+
+            if (isset($flagEnv['version'])) {
+                $this->line("<fg=green>Version:</> " . $flagEnv['version']);
+            }
+
+            if (isset($flagEnv['fallthrough'])) {
+                $this->line("<fg=green>Default rule:</> " . $this->describeVariation($flagEnv['fallthrough'], $flagDetails['variations']));
+            }
+
+            $this->displayTargetingRules($flagEnv, $flagDetails);
+            $this->displayUserTargets($flagEnv, $flagDetails);
+            $this->displayContextTargets($flagEnv, $flagDetails);
+            $this->displayPrerequisites($flagEnv);
+            $this->displayEnvironmentSummary($flagEnv, $flagDetails);
+        } else {
+            $this->warn("Environment '{$this->environmentKey}' not found or not accessible for this flag.");
+        }
+    }
+
+    protected function displayTargetingRules(array $flagEnv, array $flagDetails): void
+    {
+        if (!empty($flagEnv['rules'])) {
+            $this->newLine();
+            $this->info('==== Targeting Rules ====');
+
+            foreach ($flagEnv['rules'] as $index => $rule) {
+                $ruleName = !empty($rule['description']) ? " ({$rule['description']})" : "";
+                $this->line("<fg=yellow>Rule " . ($index + 1) . $ruleName . ":</>");
+
+                if (!empty($rule['clauses'])) {
+                    $this->line("  Conditions:");
+                    foreach ($rule['clauses'] as $clause) {
+                        $this->line("    " . $this->describeClause($clause));
+                    }
+                }
+
+                $returnValue = $this->getRuleReturnValue($rule, $flagDetails);
+                $this->line("  Returns: " . $returnValue);
+
+                if (isset($rule['trackEvents'])) {
+                    $this->line("  Track Events: " . ($rule['trackEvents'] ? 'Yes' : 'No'));
+                }
 
                 $this->newLine();
-                $this->info("==== Environment: {$environmentKey} ====");
-                $this->line("<fg=green>Status:</> " . ($flagEnv['on'] ? 'ON' : 'OFF'));
+            }
+        }
+    }
 
-                if (isset($flagEnv['lastModified'])) {
-                    $this->line("<fg=green>Last Modified:</> " . $flagEnv['lastModified']);
+    protected function getRuleReturnValue(array $rule, array $flagDetails): string
+    {
+        if (isset($rule['variation'])) {
+            return $this->describeVariation(['variation' => $rule['variation']], $flagDetails['variations']);
+        } elseif (isset($rule['rollout'])) {
+            return $this->describeVariation(['rollout' => $rule['rollout']], $flagDetails['variations']);
+        } else {
+            return 'Unknown';
+        }
+    }
+
+    protected function displayUserTargets(array $flagEnv, array $flagDetails): void
+    {
+        if (!empty($flagEnv['targets'])) {
+            $this->info('==== User Targets ====');
+
+            foreach ($flagEnv['targets'] as $target) {
+                if (!empty($target['values'])) {
+                    $variationDesc = isset($flagDetails['variations'][$target['variation']])
+                        ? ($flagDetails['variations'][$target['variation']]['name'] ?? "Variation {$target['variation']}")
+                        : "Variation {$target['variation']}";
+
+                    $this->line("<fg=yellow>{$variationDesc}:</> " . implode(', ', $target['values']));
                 }
+            }
+        }
+    }
 
-                if (isset($flagEnv['version'])) {
-                    $this->line("<fg=green>Version:</> " . $flagEnv['version']);
+    protected function displayContextTargets(array $flagEnv, array $flagDetails): void
+    {
+        if (!empty($flagEnv['contextTargets'])) {
+            $this->newLine();
+            $this->info('==== Context Targets ====');
+
+            foreach ($flagEnv['contextTargets'] as $target) {
+                if (!empty($target['values'])) {
+                    $variationDesc = isset($flagDetails['variations'][$target['variation']])
+                        ? ($flagDetails['variations'][$target['variation']]['name'] ?? "Variation {$target['variation']}")
+                        : "Variation {$target['variation']}";
+
+                    $contextKind = isset($target['contextKind']) ? " ({$target['contextKind']})" : "";
+                    $this->line("<fg=yellow>{$variationDesc}{$contextKind}:</> " . implode(', ', $target['values']));
                 }
+            }
+        }
+    }
 
-                if (isset($flagEnv['fallthrough'])) {
-                    $this->line("<fg=green>Default rule:</> " . $this->describeVariation($flagEnv['fallthrough'], $flag['variations']));
-                }
+    protected function displayPrerequisites(array $flagEnv): void
+    {
+        if (!empty($flagEnv['prerequisites'])) {
+            $this->newLine();
+            $this->info('==== Prerequisites ====');
 
-                // Show targeting rules if present
-                if (!empty($flagEnv['rules'])) {
-                    $this->newLine();
-                    $this->info('==== Targeting Rules ====');
+            foreach ($flagEnv['prerequisites'] as $prereq) {
+                $this->line("<fg=green>Flag {$prereq['key']}</> must be variation {$prereq['variation']}");
+            }
+        }
+    }
 
-                    foreach ($flagEnv['rules'] as $index => $rule) {
-                        $ruleName = !empty($rule['description']) ? " ({$rule['description']})" : "";
-                        $this->line("<fg=yellow>Rule " . ($index + 1) . $ruleName . ":</>");
+    protected function displayEnvironmentSummary(array $flagEnv, array $flagDetails): void
+    {
+        if (isset($flagEnv['summary'])) {
+            $this->newLine();
+            $this->info('==== Environment Summary ====');
 
-                        if (!empty($rule['clauses'])) {
-                            $this->line("  Conditions:");
-                            foreach ($rule['clauses'] as $clause) {
-                                $this->line("    " . $this->describeClause($clause));
-                            }
-                        }
+            if (isset($flagEnv['summary']['variations'])) {
+                foreach ($flagEnv['summary']['variations'] as $varIndex => $summary) {
+                    $variationName = isset($flagDetails['variations'][$varIndex]) && isset($flagDetails['variations'][$varIndex]['name'])
+                        ? $flagDetails['variations'][$varIndex]['name']
+                        : "Variation {$varIndex}";
 
-                        // Determine what this rule returns
-                        if (isset($rule['variation'])) {
-                            $returnValue = $this->describeVariation(['variation' => $rule['variation']], $flag['variations']);
-                        } elseif (isset($rule['rollout'])) {
-                            $returnValue = $this->describeVariation(['rollout' => $rule['rollout']], $flag['variations']);
-                        } else {
-                            $returnValue = 'Unknown';
-                        }
+                    $this->line("<fg=yellow>{$variationName}:</>");
+                    $this->line("  Target users: " . ($summary['targets'] ?? 0));
+                    $this->line("  Target contexts: " . ($summary['contextTargets'] ?? 0));
+                    $this->line("  Rules: " . ($summary['rules'] ?? 0));
 
-                        $this->line("  Returns: " . $returnValue);
+                    if (isset($summary['isFallthrough']) && $summary['isFallthrough']) {
+                        $this->line("  Is fallthrough variation");
+                    }
 
-                        if (isset($rule['trackEvents'])) {
-                            $this->line("  Track Events: " . ($rule['trackEvents'] ? 'Yes' : 'No'));
-                        }
-
-                        $this->newLine();
+                    if (isset($summary['isOff']) && $summary['isOff']) {
+                        $this->line("  Is off variation");
                     }
                 }
-
-                // Show targets (specific users) if present
-                if (!empty($flagEnv['targets'])) {
-                    $this->info('==== User Targets ====');
-
-                    foreach ($flagEnv['targets'] as $target) {
-                        if (!empty($target['values'])) {
-                            $variationDesc = isset($flag['variations'][$target['variation']])
-                                ? ($flag['variations'][$target['variation']]['name'] ?? "Variation {$target['variation']}")
-                                : "Variation {$target['variation']}";
-
-                            $this->line("<fg=yellow>{$variationDesc}:</> " . implode(', ', $target['values']));
-                        }
-                    }
-                }
-
-                // Show context targets if present (new in LD)
-                if (!empty($flagEnv['contextTargets'])) {
-                    $this->newLine();
-                    $this->info('==== Context Targets ====');
-
-                    foreach ($flagEnv['contextTargets'] as $target) {
-                        if (!empty($target['values'])) {
-                            $variationDesc = isset($flag['variations'][$target['variation']])
-                                ? ($flag['variations'][$target['variation']]['name'] ?? "Variation {$target['variation']}")
-                                : "Variation {$target['variation']}";
-
-                            $contextKind = isset($target['contextKind']) ? " ({$target['contextKind']})" : "";
-                            $this->line("<fg=yellow>{$variationDesc}{$contextKind}:</> " . implode(', ', $target['values']));
-                        }
-                    }
-                }
-
-                // Show prerequisites if present
-                if (!empty($flagEnv['prerequisites'])) {
-                    $this->newLine();
-                    $this->info('==== Prerequisites ====');
-
-                    foreach ($flagEnv['prerequisites'] as $prereq) {
-                        $this->line("<fg=green>Flag {$prereq['key']}</> must be variation {$prereq['variation']}");
-                    }
-                }
-
-                // Show environment summary if available
-                if (isset($flagEnv['summary'])) {
-                    $this->newLine();
-                    $this->info('==== Environment Summary ====');
-
-                    if (isset($flagEnv['summary']['variations'])) {
-                        foreach ($flagEnv['summary']['variations'] as $varIndex => $summary) {
-                            $variationName = isset($flag['variations'][$varIndex]) && isset($flag['variations'][$varIndex]['name'])
-                                ? $flag['variations'][$varIndex]['name']
-                                : "Variation {$varIndex}";
-
-                            $this->line("<fg=yellow>{$variationName}:</>");
-                            $this->line("  Target users: " . ($summary['targets'] ?? 0));
-                            $this->line("  Target contexts: " . ($summary['contextTargets'] ?? 0));
-                            $this->line("  Rules: " . ($summary['rules'] ?? 0));
-
-                            if (isset($summary['isFallthrough']) && $summary['isFallthrough']) {
-                                $this->line("  Is fallthrough variation");
-                            }
-
-                            if (isset($summary['isOff']) && $summary['isOff']) {
-                                $this->line("  Is off variation");
-                            }
-                        }
-                    }
-                }
-            } else {
-                $this->warn("Environment '{$environmentKey}' not found or not accessible for this flag.");
             }
         }
     }
@@ -390,5 +425,11 @@ class FlagsShow extends Command
         ];
 
         return $operators[$op] ?? $op;
+    }
+
+    protected function handleException(\Exception $e): int
+    {
+        $this->error('Error: ' . $e->getMessage());
+        return 1;
     }
 }

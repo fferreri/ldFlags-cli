@@ -503,4 +503,26 @@ class LaunchDarklyService
             throw new \Exception("Connection error: " . $e->getMessage());
         }
     }
+
+    /**
+     * Get the status of a specific flag in a project and optionally in a specific environment.
+     *
+     * @throws \Exception
+     */
+    public function getFlagStatus(string $projectKey, string $flagKey, ?string $environmentKey = null): ?array
+    {
+        try {
+            $url = "{$this->apiUrl}/flags/{$projectKey}/{$flagKey}/environments";
+            if ($environmentKey) {
+                $url .= "/{$environmentKey}";
+            }
+
+            $response = $this->client->get($url);
+            $data = json_decode($response->getBody()->getContents(), true);
+
+            return $data;
+        } catch (GuzzleException $e) {
+            return null;
+        }
+    }
 }

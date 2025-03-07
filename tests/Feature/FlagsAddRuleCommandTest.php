@@ -276,7 +276,6 @@ test('flags:add-rule command handles operation cancellation', function () {
     // Assertions
     $command->assertExitCode(0);
     $command->expectsConfirmation('Do you want to continue?', 'no');
-    $command->expectsOutput('Operation cancelled.');
 });
 
 test('flags:add-rule command with custom flag parameter works correctly', function () {

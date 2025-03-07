@@ -3,10 +3,9 @@
 namespace App\Commands;
 
 use App\Services\LaunchDarklyService;
-use LaravelZero\Framework\Commands\Command;
 use GuzzleHttp\Exception\GuzzleException;
 
-class FlagsStatus extends Command
+class FlagsStatus extends BaseCommand
 {
     /**
      * The signature of the command.
@@ -65,31 +64,28 @@ class FlagsStatus extends Command
         $this->ldService = $ldService;
 
         try {
-            $flagKey = $this->argument('flag-key');
-            $projectKey = $this->option('project') ?: config('launchdarkly.default_project');
-            $environmentKey = $this->option('environment');
+            $this->initializeOptions();
 
-            if (empty($projectKey)) {
+            if (empty($this->projectKey)) {
                 $this->error('No project specified and no default project configured.');
                 return 1;
             }
 
-            // Get flag status across environments
-            $flagStatus = $this->ldService->getFlagStatus($projectKey, $flagKey, $environmentKey);
+            $this->info("Fetching flag status for project: {$this->projectKey}, flag: {$this->flagKey}");
+
+            $flagStatus = $this->ldService->getFlagStatus($this->projectKey, $this->flagKey, $this->environmentKey);
 
             if (!$flagStatus) {
-                $this->error("Flag '{$flagKey}' not found in project '{$projectKey}'.");
+                $this->error("Flag '{$this->flagKey}' not found in project '{$this->projectKey}'.");
                 return 1;
             }
 
-            // If JSON output is requested
             if ($this->option('json')) {
-                $this->line(json_encode($flagStatus, JSON_PRETTY_PRINT));
+                $this->outputJson($flagStatus);
                 return 0;
             }
 
-            // Display flag status information
-            $this->displayFlagStatus($flagStatus, $flagKey, $projectKey);
+            $this->displayFlagStatus($flagStatus);
 
             return 0;
         } catch (GuzzleException $e) {
@@ -101,23 +97,32 @@ class FlagsStatus extends Command
         }
     }
 
-    /**
-     * Display flag status information.
-     *
-     * @param array $flagStatus
-     * @param string $flagKey
-     * @param string $projectKey
-     * @return void
-     */
-    protected function displayFlagStatus(array $flagStatus, string $flagKey, string $projectKey): void
+    protected function initializeOptions(): void
     {
-        $this->info("Flag Status: {$flagKey} (Project: {$projectKey})");
+        parent::initializeOptions();
+        $this->info("Initialized options: projectKey={$this->projectKey}, environmentKey={$this->environmentKey}, flagKey={$this->flagKey}");
+    }
+
+    protected function outputJson(array $flagStatus): void
+    {
+        parent::outputJson($flagStatus);
+    }
+
+    protected function displayFlagStatus(array $flagStatus): void
+    {
+        $this->info("Flag Status: {$this->flagKey} (Project: {$this->projectKey})");
         $this->newLine();
 
-        // Create a table of environments and their status
+        $tableData = $this->prepareTableData($flagStatus['environments']);
+        $this->displayTable($tableData);
+        $this->displayStatusDescriptions();
+    }
+
+    protected function prepareTableData(array $environments): array
+    {
         $tableData = [];
 
-        foreach ($flagStatus['environments'] as $envKey => $envStatus) {
+        foreach ($environments as $envKey => $envStatus) {
             $statusName = $envStatus['name'];
             $lastRequested = isset($envStatus['lastRequested'])
                 ? date('Y-m-d H:i:s', strtotime($envStatus['lastRequested']))
@@ -131,20 +136,32 @@ class FlagsStatus extends Command
             ];
         }
 
-        // Sort environments alphabetically
         usort($tableData, fn($a, $b) => strcmp($a['environment'], $b['environment']));
 
+        return $tableData;
+    }
+
+    protected function displayTable(array $tableData): void
+    {
         $this->table(
             ['Environment', 'Status', 'Last Requested', 'Default Value'],
             $tableData
         );
+    }
 
-        // Display status descriptions
+    protected function displayStatusDescriptions(): void
+    {
         $this->newLine();
         $this->info('Status Descriptions:');
         $this->line('  <fg=blue>new</> - Flag has been created but not used yet');
         $this->line('  <fg=yellow>inactive</> - Flag exists but is not requested by your application');
         $this->line('  <fg=green>active</> - Flag is actively being requested by your application');
         $this->line('  <fg=cyan>launched</> - Flag has been rolled out to all users (100% rule)');
+    }
+
+    protected function handleException(\Exception $e): int
+    {
+        $this->error('Error: ' . $e->getMessage());
+        return 1;
     }
 }
